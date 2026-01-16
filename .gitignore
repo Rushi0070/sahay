@@ -1,0 +1,35 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Environment variables
+.env
+.env.*
+frontend/.env
+
+# Secret/Token files - NEVER commit these!
+token.json
+gmail_token.txt
+supabase_token.txt
+credentials.json
+
+# Debug/personal data files
+email_for_llm.txt
+email_extracted.json
+raw_email_example.json
+
+# Node modules (frontend)
+frontend/node_modules/
+
+# IDE
+.cursor/
+
+# Notes (personal)
+mynotes.txt

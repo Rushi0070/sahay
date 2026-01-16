@@ -1,0 +1,12 @@
+# FastAPI Backend Dependencies
+# Generated for Railway deployment
+
+fastapi>=0.128.0
+uvicorn>=0.40.0
+python-dotenv>=1.2.1
+supabase>=2.27.0
+google-genai>=1.55.0
+google-api-python-client>=2.187.0
+google-auth-httplib2>=0.3.0
+google-auth-oauthlib>=1.2.3
+httpx>=0.27.0
