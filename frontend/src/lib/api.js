@@ -5,7 +5,11 @@
  * Handles all API calls to the FastAPI backend
  */
 
+// Get API URL from environment variable (set in Vercel dashboard)
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+// Debug: Log the API URL being used (check browser console)
+console.log('[SyncApply] API URL:', API_BASE);
 
 /**
  * Make an authenticated API request
