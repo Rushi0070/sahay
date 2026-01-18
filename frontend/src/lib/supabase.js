@@ -3,7 +3,11 @@
  * =============================
  * 
  * This sets up the Supabase client for authentication.
- * Make sure to add your Supabase URL and anon key to .env
+ * 
+ * Configuration:
+ *   Add these to your .env file:
+ *   - VITE_SUPABASE_URL: Your Supabase project URL
+ *   - VITE_SUPABASE_ANON_KEY: Your Supabase anon/public key
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -11,15 +15,13 @@ import { createClient } from '@supabase/supabase-js';
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
-// Debug: log what we got (remove in production)
-console.log('Supabase URL:', supabaseUrl ? 'SET' : 'MISSING');
-console.log('Supabase Key:', supabaseAnonKey ? 'SET' : 'MISSING');
-
-if (!supabaseUrl || !supabaseAnonKey) {
-  console.error('Missing Supabase environment variables! Check your .env file.');
+// Warn in development if environment variables are missing
+if (import.meta.env.DEV && (!supabaseUrl || !supabaseAnonKey)) {
+  console.warn('Missing Supabase environment variables. Check your .env file.');
 }
 
-// Create client (will work but auth won't function if vars are missing)
+// Create Supabase client
+// Uses placeholder values if env vars missing (auth won't work but app won't crash)
 export const supabase = createClient(
   supabaseUrl || 'https://placeholder.supabase.co', 
   supabaseAnonKey || 'placeholder-key'

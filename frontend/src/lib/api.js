@@ -2,14 +2,15 @@
  * API Client for SyncApply Backend
  * =================================
  * 
- * Handles all API calls to the FastAPI backend
+ * Handles all API calls to the FastAPI backend.
+ * 
+ * Configuration:
+ *   Set VITE_API_URL in your .env file or deployment platform
+ *   to point to your backend API URL.
  */
 
-// Get API URL from environment variable (set in Vercel dashboard)
+// Get API URL from environment variable (set in Vercel/deployment dashboard)
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-
-// Debug: Log the API URL being used (check browser console)
-console.log('[SyncApply] API URL:', API_BASE);
 
 /**
  * Make an authenticated API request
