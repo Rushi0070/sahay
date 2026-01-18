@@ -1,18 +1,26 @@
 [project]
 name = "sahay"
 version = "0.1.0"
-description = "Add your description here"
+description = "SyncApply - Gmail Job Application Tracker"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    # Web Framework
     "fastapi>=0.128.0",
+    "uvicorn>=0.40.0",
+    
+    # HTTP Client
+    "httpx>=0.27.0",
+    
+    # Google APIs
+    "google-genai>=1.55.0",
     "google-api-python-client>=2.187.0",
     "google-auth-httplib2>=0.3.0",
     "google-auth-oauthlib>=1.2.3",
-    "google-genai>=1.55.0",
-    "google-generativeai>=0.8.6",
-    "npm>=0.1.1",
-    "python-dotenv>=1.2.1",
+    
+    # Database
     "supabase>=2.27.0",
-    "uvicorn>=0.40.0",
+    
+    # Environment
+    "python-dotenv>=1.2.1",
 ]

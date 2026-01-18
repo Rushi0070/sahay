@@ -2,12 +2,23 @@
 Gmail Email Fetcher for Job Application Tracking
 =================================================
 
-This script:
-1. Authenticates with Gmail using Google OAuth (via Supabase)
-2. Fetches emails from your inbox
-3. Extracts useful content (headers, body, attachments)
-4. Formats the email for LLM processing
-5. Saves job applications to a Supabase database
+This module handles all Gmail-related functionality:
+    1. Authentication with Google OAuth (via Supabase)
+    2. Fetching emails from Gmail API
+    3. Extracting email content (headers, body, attachments)
+    4. Formatting emails for LLM processing
+    5. Saving job applications to Supabase database
+
+The main classes are:
+    - GmailAuthenticator: Handles OAuth flow and token management
+    - GmailFetcher: Fetches and processes emails from Gmail
+    - JobApplicationTracker: Saves applications to Supabase
+
+Usage (standalone):
+    python fetch_emails.py
+    
+Usage (as module):
+    from fetch_emails import GmailFetcher, JobApplicationTracker
 """
 
 # =============================================================================
@@ -17,7 +28,6 @@ This script:
 import os
 import re
 import base64
-import json
 import webbrowser
 from html import unescape
 from dataclasses import dataclass
@@ -31,6 +41,7 @@ from dotenv import load_dotenv
 
 from llm_evoke import extract_email_info_using_gemini
 
+# Load environment variables from .env file
 load_dotenv()
 
 
@@ -40,7 +51,25 @@ load_dotenv()
 
 @dataclass
 class ExtractedEmail:
-    """Container for email data processed for LLM consumption."""
+    """
+    Container for email data that has been processed for LLM consumption.
+    
+    This dataclass holds all the relevant parts of an email after extraction
+    from the raw Gmail API response. It separates the email into easily 
+    accessible components.
+    
+    Attributes:
+        id: Unique Gmail message ID
+        thread_id: ID of the email thread this message belongs to
+        labels: List of Gmail labels (e.g., "INBOX", "UNREAD")
+        snippet: Short preview of the email content
+        headers: Dictionary of email headers (From, To, Subject, Date, etc.)
+        body_text: The best available text representation of the email body
+        body_plain: Plain text version of the body (if available)
+        body_html: HTML version of the body (if available)
+        attachments: List of attachment metadata (filename, size, mime type)
+        inline_images: List of inline image metadata
+    """
     id: str
     thread_id: str
     labels: list
@@ -58,8 +87,21 @@ class ExtractedEmail:
 # =============================================================================
 
 def decode_base64_content(encoded_data: str) -> str:
-    """Decode base64-encoded email content from Gmail."""
+    """
+    Decode base64-encoded email content from Gmail.
+    
+    Gmail API returns email body content in base64url encoding. This function
+    handles the decoding process safely, returning an empty string if decoding
+    fails for any reason.
+    
+    Args:
+        encoded_data: The base64url-encoded string from Gmail API
+        
+    Returns:
+        Decoded string content, or empty string if decoding fails
+    """
     try:
+        # Gmail uses URL-safe base64 encoding
         decoded_bytes = base64.urlsafe_b64decode(encoded_data)
         return decoded_bytes.decode('utf-8', errors='ignore')
     except Exception:
@@ -67,20 +109,44 @@ def decode_base64_content(encoded_data: str) -> str:
 
 
 def convert_html_to_plain_text(html_content: str) -> str:
-    """Convert HTML content to plain text by removing tags and scripts."""
-    # Remove style and script tags
-    text = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r'<script[^>]*>.*?</script>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    """
+    Convert HTML email content to plain text.
     
-    # Remove all HTML tags
+    Many emails are HTML-only. This function strips out HTML tags, scripts,
+    and styles to produce readable plain text. It also converts HTML entities
+    to their character equivalents.
+    
+    Args:
+        html_content: Raw HTML string from the email body
+        
+    Returns:
+        Clean plain text with HTML tags and scripts removed
+    """
+    # Step 1: Remove style blocks (CSS that would clutter the output)
+    text = re.sub(
+        r'<style[^>]*>.*?</style>', 
+        '', 
+        html_content, 
+        flags=re.DOTALL | re.IGNORECASE
+    )
+    
+    # Step 2: Remove script blocks (JavaScript)
+    text = re.sub(
+        r'<script[^>]*>.*?</script>', 
+        '', 
+        text, 
+        flags=re.DOTALL | re.IGNORECASE
+    )
+    
+    # Step 3: Remove all remaining HTML tags
     text = re.sub(r'<[^>]+>', ' ', text)
     
-    # Convert HTML entities
+    # Step 4: Convert HTML entities (e.g., &amp; -> &, &nbsp; -> space)
     text = unescape(text)
     
-    # Clean up whitespace
-    text = re.sub(r'\s+', ' ', text)
-    text = re.sub(r'\n\s*\n', '\n\n', text)
+    # Step 5: Clean up excessive whitespace
+    text = re.sub(r'\s+', ' ', text)  # Multiple spaces to single space
+    text = re.sub(r'\n\s*\n', '\n\n', text)  # Normalize blank lines
     
     return text.strip()
 
@@ -90,38 +156,55 @@ def convert_html_to_plain_text(html_content: str) -> str:
 # =============================================================================
 
 def extract_email_content(raw_gmail_response: dict) -> ExtractedEmail:
-    """Extract useful content from a raw Gmail API response."""
+    """
+    Extract useful content from a raw Gmail API response.
+    
+    The Gmail API returns emails in a complex nested structure with MIME parts.
+    This function recursively processes all parts to extract the plain text body,
+    HTML body, and any attachments.
+    
+    Args:
+        raw_gmail_response: The raw JSON response from Gmail API messages.get()
+        
+    Returns:
+        ExtractedEmail object with all content properly extracted
+    """
+    # Initialize containers for extracted content
     headers = {}
     body_plain = None
     body_html = None
     attachments = []
     inline_images = []
     
-    # Basic info
+    # Extract basic metadata from the response
     email_id = raw_gmail_response.get("id", "")
     thread_id = raw_gmail_response.get("threadId", "")
     labels = raw_gmail_response.get("labelIds", [])
     snippet = raw_gmail_response.get("snippet", "")
     
-    # Extract headers
+    # Get the payload which contains headers and body parts
     payload = raw_gmail_response.get("payload", {})
     raw_headers = payload.get("headers", [])
     
+    # Extract only the headers we care about for job applications
+    # These are the most useful for understanding email context
     useful_headers = ["From", "To", "Cc", "Bcc", "Subject", "Date", "Reply-To"]
     for header in raw_headers:
         if header["name"] in useful_headers:
             headers[header["name"]] = header["value"]
     
-    # Process MIME parts recursively
+    # Define a recursive function to process MIME parts
+    # Emails can have deeply nested multipart structures
     def process_mime_part(part: dict):
+        """Process a single MIME part and its nested children."""
         nonlocal body_plain, body_html, attachments, inline_images
         
         mime_type = part.get("mimeType", "")
         filename = part.get("filename", "")
         body_data = part.get("body", {})
         
+        # Check if this part is an attachment (has a filename)
         if filename:
-            # It's an attachment
             attachment_info = {
                 "filename": filename,
                 "mime_type": mime_type,
@@ -129,6 +212,7 @@ def extract_email_content(raw_gmail_response: dict) -> ExtractedEmail:
                 "attachment_id": body_data.get("attachmentId", ""),
             }
             
+            # Separate large images (likely inline) from regular attachments
             is_image = mime_type.startswith("image/")
             is_large = body_data.get("size", 0) > 5000
             
@@ -137,21 +221,25 @@ def extract_email_content(raw_gmail_response: dict) -> ExtractedEmail:
             else:
                 attachments.append(attachment_info)
         
+        # Check if this part has body content (no filename, has data)
         elif body_data.get("data"):
-            # It's body content
             decoded = decode_base64_content(body_data["data"])
+            
+            # Store plain text and HTML versions separately
             if mime_type == "text/plain":
                 body_plain = decoded
             elif mime_type == "text/html":
                 body_html = decoded
         
-        # Process nested parts
+        # Recursively process any nested parts (multipart emails)
         for sub_part in part.get("parts", []):
             process_mime_part(sub_part)
     
+    # Start processing from the top-level payload
     process_mime_part(payload)
     
-    # Determine best body text
+    # Determine the best body text to use
+    # Prefer plain text, fall back to converted HTML, then snippet
     if body_plain:
         body_text = body_plain
     elif body_html:
@@ -174,15 +262,28 @@ def extract_email_content(raw_gmail_response: dict) -> ExtractedEmail:
 
 
 def format_email_for_llm(email: ExtractedEmail) -> str:
-    """Format an extracted email as clean text for LLM processing."""
+    """
+    Format an extracted email as clean text for LLM processing.
+    
+    This creates a structured text representation of the email that is
+    easy for LLMs to parse and understand. The format includes clear
+    section headers and organized metadata.
+    
+    Args:
+        email: An ExtractedEmail object to format
+        
+    Returns:
+        A formatted string suitable for sending to an LLM
+    """
     lines = []
     
+    # Header section
     lines.append("=" * 50)
     lines.append("EMAIL CONTENT")
     lines.append("=" * 50)
     lines.append("")
     
-    # Metadata
+    # Metadata section - key headers for understanding context
     lines.append("--- METADATA ---")
     for key in ["From", "To", "Cc", "Date", "Subject"]:
         if key in email.headers:
@@ -190,25 +291,25 @@ def format_email_for_llm(email: ExtractedEmail) -> str:
     lines.append(f"Labels: {', '.join(email.labels)}")
     lines.append("")
     
-    # Body
+    # Body section - the main email content
     lines.append("--- BODY ---")
     lines.append(email.body_text if email.body_text else "(No body content)")
     lines.append("")
     
-    # Attachments
+    # Attachments section (if any)
     if email.attachments:
         lines.append("--- ATTACHMENTS ---")
         for att in email.attachments:
             size_kb = att["size"] / 1024
-            lines.append(f"• {att['filename']} ({att['mime_type']}, {size_kb:.1f} KB)")
+            lines.append(f"- {att['filename']} ({att['mime_type']}, {size_kb:.1f} KB)")
         lines.append("")
     
-    # Images
+    # Images section (if any)
     if email.inline_images:
         lines.append("--- IMAGES ---")
         for img in email.inline_images:
             size_kb = img["size"] / 1024
-            lines.append(f"• {img['filename']} ({img['mime_type']}, {size_kb:.1f} KB)")
+            lines.append(f"- {img['filename']} ({img['mime_type']}, {size_kb:.1f} KB)")
         lines.append("")
     
     lines.append("=" * 50)
@@ -221,14 +322,47 @@ def format_email_for_llm(email: ExtractedEmail) -> str:
 # =============================================================================
 
 class GmailAuthenticator:
-    """Handles Gmail authentication through Supabase OAuth."""
+    """
+    Handles Gmail authentication through Supabase OAuth.
+    
+    This class manages the OAuth flow for getting a Google access token
+    that has permission to read Gmail. It handles:
+        - Loading saved tokens from disk
+        - Validating token expiration
+        - Running the OAuth flow via browser
+        - Saving tokens for reuse
+    
+    The authentication flow works by:
+        1. Opening a browser to Google's OAuth consent screen
+        2. Starting a local HTTP server to receive the callback
+        3. Extracting the provider_token from the callback URL
+        4. Saving the token for future use
+    
+    Attributes:
+        token_file: Path to file where token is stored
+        access_token: Current access token (if authenticated)
+    """
     
     def __init__(self, token_file: str = "gmail_token.txt"):
+        """
+        Initialize the authenticator.
+        
+        Args:
+            token_file: Path to store/load the access token
+        """
         self.token_file = token_file
         self.access_token: Optional[str] = None
     
     def get_oauth_url(self) -> str:
-        """Generate the OAuth login URL."""
+        """
+        Generate the OAuth login URL for Supabase Google auth.
+        
+        This constructs the URL that will redirect users to Google's
+        consent screen with the correct scopes for Gmail access.
+        
+        Returns:
+            Full OAuth URL to open in browser
+        """
         params = {
             'provider': 'google',
             'redirect_to': 'http://localhost:3000',
@@ -238,7 +372,15 @@ class GmailAuthenticator:
         return f"{supabase_url}/auth/v1/authorize?{urlencode(params)}"
     
     def is_token_valid(self, token: str) -> bool:
-        """Check if token is still valid."""
+        """
+        Check if a token is still valid by calling Google's tokeninfo endpoint.
+        
+        Args:
+            token: The access token to validate
+            
+        Returns:
+            True if token is valid, False otherwise
+        """
         try:
             response = httpx.get(
                 'https://www.googleapis.com/oauth2/v1/tokeninfo',
@@ -250,7 +392,15 @@ class GmailAuthenticator:
             return False
     
     def load_saved_token(self) -> Optional[str]:
-        """Load and validate saved token."""
+        """
+        Load and validate a previously saved token.
+        
+        Checks if a token file exists, reads it, and validates that
+        the token is still valid with Google.
+        
+        Returns:
+            Valid token string, or None if no valid token exists
+        """
         if not os.path.exists(self.token_file):
             return None
         
@@ -264,22 +414,43 @@ class GmailAuthenticator:
         return None
     
     def save_token(self, token: str):
-        """Save token to file."""
+        """
+        Save a token to the token file.
+        
+        Args:
+            token: The access token to save
+        """
         with open(self.token_file, 'w') as f:
             f.write(token)
     
     def run_oauth_flow(self) -> str:
-        """Run OAuth flow: open browser, wait for callback, return token."""
+        """
+        Run the full OAuth flow: open browser, wait for callback, return token.
+        
+        This method:
+            1. Opens the user's browser to Google's consent page
+            2. Starts a local HTTP server on port 3000
+            3. Waits for Google to redirect back with the token
+            4. Extracts and returns the provider_token
+        
+        Returns:
+            The Google access token from the OAuth flow
+        """
         captured_token = None
         
         class OAuthCallbackHandler(BaseHTTPRequestHandler):
+            """HTTP handler to receive the OAuth callback."""
+            
             def do_GET(self):
+                """Handle the GET request from OAuth redirect."""
                 nonlocal captured_token
                 
+                # Parse the query parameters from the callback URL
                 query_string = urlparse(self.path).query
                 params = parse_qs(query_string)
                 
                 if 'provider_token' in params:
+                    # Token received! Send success page and store token
                     captured_token = params['provider_token'][0]
                     self.send_response(200)
                     self.send_header('Content-type', 'text/html')
@@ -289,12 +460,13 @@ class GmailAuthenticator:
                             justify-content: center; align-items: center; 
                             height: 100vh; margin: 0; background: #0f172a;">
                             <div style="text-align: center; color: white;">
-                                <h1 style="color: #22c55e;">&#10003; Success!</h1>
+                                <h1 style="color: #22c55e;">Success!</h1>
                                 <p>You can close this window.</p>
                             </div>
                         </body></html>
                     ''')
                 else:
+                    # No token yet - send page with JS to extract from hash
                     self.send_response(200)
                     self.send_header('Content-type', 'text/html')
                     self.end_headers()
@@ -317,11 +489,14 @@ class GmailAuthenticator:
                     ''')
             
             def log_message(self, format, *args):
-                pass  # Suppress logging
+                """Suppress default HTTP server logging."""
+                pass
         
+        # Open browser and wait for callback
         print("Opening browser for Google sign-in...")
         webbrowser.open(self.get_oauth_url())
         
+        # Start local server to receive the callback
         server = HTTPServer(('localhost', 3000), OAuthCallbackHandler)
         while captured_token is None:
             server.handle_request()
@@ -330,16 +505,27 @@ class GmailAuthenticator:
         return captured_token
     
     def authenticate(self) -> str:
-        """Get a valid access token (from cache or by logging in)."""
+        """
+        Get a valid access token, either from cache or by logging in.
+        
+        This is the main entry point for authentication. It first tries
+        to use a saved token, and only runs the OAuth flow if necessary.
+        
+        Returns:
+            A valid Google access token
+        """
+        # Try to use saved token first
         saved_token = self.load_saved_token()
         if saved_token:
             print("Using saved authentication token.")
             self.access_token = saved_token
             return saved_token
         
+        # No valid saved token - need to login
         print("No valid saved token. Starting login flow...")
         new_token = self.run_oauth_flow()
         
+        # Save for next time
         self.save_token(new_token)
         print("Login successful! Token saved.")
         
@@ -352,16 +538,43 @@ class GmailAuthenticator:
 # =============================================================================
 
 class GmailFetcher:
-    """Fetches emails from Gmail API."""
+    """
+    Fetches emails from Gmail API.
+    
+    This class handles all communication with the Gmail API to fetch
+    email lists and individual email details. It uses the access token
+    from GmailAuthenticator.
+    
+    Attributes:
+        GMAIL_API_BASE: Base URL for Gmail API endpoints
+        access_token: Google access token with Gmail scope
+        headers: HTTP headers including Authorization
+    """
     
     GMAIL_API_BASE = "https://www.googleapis.com/gmail/v1/users/me"
     
     def __init__(self, access_token: str):
+        """
+        Initialize the fetcher with an access token.
+        
+        Args:
+            access_token: Valid Google access token with Gmail read scope
+        """
         self.access_token = access_token
         self.headers = {"Authorization": f"Bearer {access_token}"}
     
     def fetch_email_list(self, query: str = "in:inbox", max_results: int = 10) -> list[dict]:
-        """Get list of email IDs matching a search query."""
+        """
+        Get a list of email IDs matching a search query.
+        
+        Args:
+            query: Gmail search query (same syntax as Gmail search box)
+                   Examples: "in:inbox", "from:company.com", "subject:application"
+            max_results: Maximum number of emails to return (1-500)
+            
+        Returns:
+            List of dicts with 'id' and 'threadId' keys
+        """
         url = f"{self.GMAIL_API_BASE}/messages"
         params = {"maxResults": max_results, "q": query}
         
@@ -376,7 +589,15 @@ class GmailFetcher:
             return data.get("messages", [])
     
     def fetch_email_details(self, message_id: str) -> dict:
-        """Get full details of a single email."""
+        """
+        Get the full details of a single email by its ID.
+        
+        Args:
+            message_id: The Gmail message ID
+            
+        Returns:
+            Full email data from Gmail API
+        """
         url = f"{self.GMAIL_API_BASE}/messages/{message_id}"
         
         with httpx.Client(timeout=30.0) as client:
@@ -384,12 +605,37 @@ class GmailFetcher:
             return response.json()
     
     def fetch_and_extract_email(self, message_id: str) -> ExtractedEmail:
-        """Fetch an email and extract it for LLM processing."""
+        """
+        Fetch an email and extract it for processing.
+        
+        Combines fetch_email_details and extract_email_content into
+        a single convenient method.
+        
+        Args:
+            message_id: The Gmail message ID
+            
+        Returns:
+            ExtractedEmail object ready for LLM processing
+        """
         raw_email = self.fetch_email_details(message_id)
         return extract_email_content(raw_email)
     
     def fetch_latest_email_for_llm(self, query: str = "in:inbox") -> tuple[ExtractedEmail, str]:
-        """Fetch most recent email formatted for LLM."""
+        """
+        Fetch the most recent email and format it for LLM processing.
+        
+        This is a convenience method that fetches the latest email matching
+        a query and returns both the extracted email and its LLM-formatted text.
+        
+        Args:
+            query: Gmail search query
+            
+        Returns:
+            Tuple of (ExtractedEmail, formatted_string)
+            
+        Raises:
+            ValueError: If no emails match the query
+        """
         messages = self.fetch_email_list(query=query, max_results=1)
         
         if not messages:
@@ -406,79 +652,122 @@ class GmailFetcher:
 # =============================================================================
 
 class JobApplicationTracker:
-    """Saves job applications to Supabase database."""
+    """
+    Saves job applications to Supabase database.
+    
+    This class handles the database operations for tracking job applications.
+    It uses the LLM to classify emails and extract relevant information before
+    saving to Supabase.
+    
+    The workflow is:
+        1. Check if email was already processed (by Gmail ID)
+        2. Send email to LLM for classification
+        3. If it's a job email, extract company/title/status
+        4. Save to Supabase 'active_applications' table
+    
+    Attributes:
+        supabase: Supabase client instance
+    """
     
     def __init__(self):
+        """Initialize the tracker with Supabase client."""
         self.supabase: Client = create_client(
             os.getenv('SUPABASE_URL'),
             os.getenv('SUPABASE_KEY')
         )
     
     def save_application(self, email: ExtractedEmail) -> bool:
-        """Save a job application to the database using LLM extraction."""
-        gmail_id = email.id  # The actual Gmail message ID
+        """
+        Save a job application to the database using LLM extraction.
         
-        # Step 1: Check if this email was already processed (using email_id column)
+        This method:
+            1. Checks if this email was already processed
+            2. Uses the LLM to classify and extract information
+            3. Only saves if it's a job application email
+        
+        Args:
+            email: ExtractedEmail object to process
+            
+        Returns:
+            True if saved successfully, False if skipped/duplicate
+        """
+        gmail_id = email.id
+        
+        # Step 1: Check if this email was already processed
         existing = self.supabase.table('active_applications').select('email_id').eq('email_id', gmail_id).execute()
         
         if existing.data:
-            print(f"• Already processed: Email ID {gmail_id[:20]}...")
+            print(f"- Already processed: Email ID {gmail_id[:20]}...")
             return False
         
         # Step 2: Classify and extract using LLM
         result = extract_email_info_using_gemini(email.body_text)
         
-        # Check if LLM classified this as a job application
+        # Step 3: Check if LLM classified this as a job application
         if not result.get('is_job_application', False):
             reason = result.get('reasoning', 'Not classified as job application')
-            print(f"⏭️  Not saving: {reason}")
+            print(f"- Skipped: {reason}")
             return False
         
         company_name = result['company_name']
         job_title = result['job_title']
         
-        # Step 3: Save to database (store Gmail ID in email_id for deduplication)
+        # Step 4: Save to database
         try:
             self.supabase.table('active_applications').insert({
                 'company_name': result['company_name'],
                 'job_title': result['job_title'],
                 'status': result['status'],
-                'email_id': gmail_id  # Store actual Gmail message ID here
+                'email_id': gmail_id
             }).execute()
             
-            print(f"✓ Saved: {company_name} - {job_title or 'Unknown Position'}")
+            print(f"+ Saved: {company_name} - {job_title or 'Unknown Position'}")
             return True
             
         except Exception as e:
+            # Handle duplicate key errors gracefully
             if 'duplicate' in str(e).lower() or '23505' in str(e):
-                print(f"• Already tracked: {company_name}")
+                print(f"- Already tracked: {company_name}")
                 return False
             raise
     
     def get_all_applications(self) -> list[dict]:
-        """Get all tracked applications from the database."""
+        """
+        Get all tracked applications from the database.
+        
+        Returns:
+            List of application records as dictionaries
+        """
         result = self.supabase.table('active_applications').select('*').execute()
         return result.data
 
 
 # =============================================================================
-# MAIN
+# MAIN - Standalone script execution
 # =============================================================================
 
 def main():
-    """Fetch latest email and save to Supabase."""
+    """
+    Main entry point for standalone script execution.
+    
+    This function demonstrates the full workflow:
+        1. Authenticate with Gmail
+        2. Fetch the latest email
+        3. Display the email content
+        4. Save to Supabase if it's a job application
+    """
     print("=" * 60)
     print("  Gmail Job Application Tracker")
     print("=" * 60)
     print()
     
-    # Step 1: Authenticate
+    # Step 1: Authenticate with Gmail
     print("Step 1: Authenticating with Gmail...")
     auth = GmailAuthenticator()
     token = auth.authenticate()
     print()
     
-    # Step 2: Fetch email
+    # Step 2: Fetch the latest email
     print("Step 2: Fetching most recent email...")
     fetcher = GmailFetcher(access_token=token)
     
@@ -489,21 +778,14 @@ def main():
         return
     print()
     
-    # Step 3: Display email
+    # Step 3: Display email content
     print("Step 3: Email content:")
     print()
     print(llm_formatted)
     print()
     
-    # Step 4: Save files
-    print("Step 4: Saving files...")
-    with open("email_for_llm.txt", "w", encoding="utf-8") as f:
-        f.write(llm_formatted)
-    print("  • email_for_llm.txt saved")
-    print()
-    
-    # Step 5: Save to Supabase
-    print("Step 5: Saving to Supabase...")
+    # Step 4: Save to Supabase (if it's a job application)
+    print("Step 4: Processing with LLM and saving...")
     tracker = JobApplicationTracker()
     tracker.save_application(extracted_email)
     
